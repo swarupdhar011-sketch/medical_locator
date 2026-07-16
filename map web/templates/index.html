@@ -1,0 +1,392 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Global Hospital Locator & Route Engine</title>
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            display: flex;
+            height: 100vh;
+            background-color: #f4f6f9;
+        }
+        #map {
+            flex: 1;
+            height: 100%;
+        }
+        #sidebar {
+            width: 360px;
+            background-color: #1e293b;
+            color: #ffffff;
+            padding: 20px;
+            box-shadow: -2px 0 10px rgba(0,0,0,0.3);
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+            overflow-y: auto;
+            z-index: 1000;
+        }
+        h2 {
+            margin-top: 0;
+            font-size: 22px;
+            border-bottom: 2px solid #3b82f6;
+            padding-bottom: 10px;
+        }
+        .search-box {
+            position: relative;
+        }
+        .search-box input {
+            width: 100%;
+            padding: 10px;
+            border-radius: 6px;
+            border: none;
+            background-color: #334155;
+            color: #fff;
+            box-sizing: border-box;
+        }
+        .search-box input::placeholder {
+            color: #94a3b8;
+        }
+        .search-results {
+            position: absolute;
+            top: 100%;
+            left: 0;
+            right: 0;
+            background: #334155;
+            border-radius: 0 0 6px 6px;
+            max-height: 200px;
+            overflow-y: auto;
+            z-index: 1010;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.2);
+        }
+        .search-item {
+            padding: 10px;
+            cursor: pointer;
+            border-bottom: 1px solid #475569;
+            font-size: 13px;
+        }
+        .search-item:hover {
+            background-color: #475569;
+        }
+        .btn-track {
+            background-color: #3b82f6;
+            color: white;
+            border: none;
+            padding: 10px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-weight: bold;
+            transition: background 0.2s;
+        }
+        .btn-track:hover {
+            background-color: #2563eb;
+        }
+        .legend, .details-panel {
+            background-color: #334155;
+            padding: 15px;
+            border-radius: 8px;
+        }
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 8px;
+        }
+        .dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            display: inline-block;
+        }
+        .dot.searched-hospital { background-color: #ef4444; }
+        .dot.auto-loc { background-color: #06b6d4; }
+        .dot.placed-loc { background-color: #eab308; }
+        
+        #facility-details p {
+            margin: 6px 0;
+            font-size: 14px;
+        }
+        .distance-highlight {
+            color: #3b82f6;
+            font-weight: bold;
+        }
+        .time-highlight {
+            color: #22c55e;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="map"></div>
+
+    <div id="sidebar">
+        <h2>Hospital Directory</h2>
+        
+        <button class="btn-track" id="track-btn">🎯 Center Map on GPS</button>
+
+        <div class="search-box">
+            <input type="text" id="search-input" placeholder="Search any hospital worldwide...">
+            <div id="search-results" class="search-results" style="display: none;"></div>
+        </div>
+
+        <div class="legend">
+            <h3>Map Legend</h3>
+            <div class="legend-item"><span class="dot searched-hospital"></span> Hospital Facility (Red Pin)</div>
+            <div class="legend-item"><span class="dot auto-loc"></span> Your Auto GPS Location (Blue Pin)</div>
+            <div class="legend-item"><span class="dot placed-loc"></span> Your Placed Location (Gold Pin)</div>
+        </div>
+
+        <div class="details-panel">
+            <h3>Live Route Engine</h3>
+            <div id="facility-details">
+                <p style="color: #94a3b8;">Search for a hospital or click any red marker directly on the map. Then double-click anywhere to see routes and travel time.</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Leaflet JS -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script>
+        // Default center
+        const defaultLat = 20.8398;
+        const defaultLng = 85.1015;
+
+        const map = L.map('map', { doubleClickZoom: false }).setView([defaultLat, defaultLng], 14);
+
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            maxZoom: 19,
+            attribution: '© OpenStreetMap contributors'
+        }).addTo(map);
+
+        function createCustomIcon(hue) {
+            return new L.Icon({
+                iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-' + hue + '.png',
+                shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/0.7.7/images/marker-shadow.png',
+                iconSize: [25, 41],
+                iconAnchor: [12, 41],
+                popupAnchor: [1, -34],
+                shadowSize: [41, 41]
+            });
+        }
+
+        const autoLocIcon = createCustomIcon('blue');      
+        const placedLocIcon = createCustomIcon('gold');    
+        const hospitalIcon = createCustomIcon('red');         
+
+        let autoLocationMarker = null;
+        let placedLocationMarker = null;
+        let currentTargetHospital = null;
+        let activeRouteLine = null;
+        let currentHospitalMarker = null;
+
+        let coords = { auto: null, manual: null };
+
+        // --- GPS Tracker ---
+        function updatePreciseLocation(position) {
+            const lat = position.coords.latitude;
+            const lng = position.coords.longitude;
+            coords.auto = L.latLng(lat, lng);
+
+            if (!autoLocationMarker) {
+                autoLocationMarker = L.marker(coords.auto, { icon: autoLocIcon }).addTo(map);
+                autoLocationMarker.bindPopup("<b>Your Auto GPS Location</b>");
+                map.setView(coords.auto, 14);
+            } else {
+                autoLocationMarker.setLatLng(coords.auto);
+            }
+
+            if (currentTargetHospital) displayRouteCalculations();
+        }
+
+        function handleLocationError(error) {
+            console.warn("GPS tracking unavailable. Setting base anchor coordinate.");
+            coords.auto = L.latLng(20.8375, 85.1250);
+            if (!autoLocationMarker) {
+                autoLocationMarker = L.marker(coords.auto, { icon: autoLocIcon }).addTo(map);
+                autoLocationMarker.bindPopup("<b>Default GPS Anchor Location</b>");
+            }
+        }
+
+        if (navigator.geolocation) {
+            navigator.geolocation.watchPosition(updatePreciseLocation, handleLocationError, {
+                enableHighAccuracy: true,
+                timeout: 10000,
+                maximumAge: 0
+            });
+        }
+
+        document.getElementById('track-btn').addEventListener('click', () => {
+            if (coords.auto) {
+                map.setView(coords.auto, 15);
+            } else {
+                alert("Acquiring GPS coordinates...");
+            }
+        });
+
+        // --- Double Click Map to Place Pin ---
+        map.on('dblclick', function(e) {
+            coords.manual = e.latlng;
+
+            if (!placedLocationMarker) {
+                placedLocationMarker = L.marker(coords.manual, { icon: placedLocIcon }).addTo(map);
+                placedLocationMarker.bindPopup("<b>Your Placed Location Pointer</b>").openPopup();
+            } else {
+                placedLocationMarker.setLatLng(coords.manual).openPopup();
+            }
+
+            if (currentTargetHospital) displayRouteCalculations();
+        });
+
+        // --- OSRM Global Distance Engine ---
+        async function getRoadRoutingData(startLatLng, endLatLng) {
+            if (!startLatLng || !endLatLng) return null;
+            try {
+                const url = `https://router.project-osrm.org/route/v1/driving/${startLatLng.lng},${startLatLng.lat};${endLatLng.lng},${endLatLng.lat}?overview=full&geometries=geojson`;
+                const response = await fetch(url);
+                const data = await response.json();
+
+                if (data.code === 'Ok' && data.routes.length > 0) {
+                    const route = data.routes[0];
+                    return {
+                        distance: (route.distance / 1000).toFixed(2), 
+                        duration: Math.round(route.duration / 60),    
+                        geometry: route.geometry
+                    };
+                }
+            } catch (err) {
+                console.error("OSRM Route engine failure: ", err);
+            }
+            return null;
+        }
+
+        // --- Layout Renderer (Calculates Distances & Paths) ---
+        async function displayRouteCalculations() {
+            if (!currentTargetHospital) return;
+            
+            const hospitalLatLng = L.latLng(currentTargetHospital.lat, currentTargetHospital.lng);
+
+            if (activeRouteLine) map.removeLayer(activeRouteLine);
+
+            const detailsElement = document.getElementById('facility-details');
+            detailsElement.innerHTML = `<p style="color: #94a3b8;">Computing network road route paths...</p>`;
+
+            const routeFromAuto = await getRoadRoutingData(coords.auto, hospitalLatLng);
+            const routeFromManual = await getRoadRoutingData(coords.manual, hospitalLatLng);
+
+            if (routeFromManual && routeFromManual.geometry) {
+                activeRouteLine = L.geoJSON(routeFromManual.geometry, {
+                    style: { color: '#eab308', weight: 5, opacity: 0.8 }
+                }).addTo(map);
+            } else if (routeFromAuto && routeFromAuto.geometry) {
+                activeRouteLine = L.geoJSON(routeFromAuto.geometry, {
+                    style: { color: '#3b82f6', weight: 4, opacity: 0.7 }
+                }).addTo(map);
+            }
+
+            detailsElement.innerHTML = `
+                <p><b>Target Destination:</b> ${currentTargetHospital.name}</p>
+                <p><b>Address Details:</b> ${currentTargetHospital.address || 'N/A'}</p>
+                <hr style="border: 0; border-top: 1px solid #475569; margin: 10px 0;">
+                <p>🚗 <b>Exact Real Road Distances & Timings:</b></p>
+                
+                <p style="margin-left: 5px;">• <b>From Your Auto GPS Location:</b><br>
+                   Distance: <span class="distance-highlight">${routeFromAuto ? routeFromAuto.distance + ' km' : 'Syncing GPS...'}</span><br>
+                   Est. Travel Time: <span class="time-highlight">${routeFromAuto ? routeFromAuto.duration + ' mins' : 'N/A'}</span>
+                </p>
+                
+                <p style="margin-left: 5px; margin-top: 10px;">• <b>From Your Placed Location Pointer:</b><br>
+                   Distance: <span class="distance-highlight">${routeFromManual ? routeFromManual.distance + ' km' : 'Double-click map to calculate'}</span><br>
+                   Est. Travel Time: <span class="time-highlight">${routeFromManual ? routeFromManual.duration + ' mins' : 'N/A'}</span>
+                </p>
+            `;
+        }
+
+        // --- Global Nominatim Search Bar Engine ---
+        const searchInput = document.getElementById('search-input');
+        const searchResults = document.getElementById('search-results');
+        let searchDebounceTimer;
+
+        // Reusable Helper to register a chosen hospital (Used by both Search Box and Map clicks)
+        function selectHospital(name, address, lat, lng) {
+            currentTargetHospital = {
+                name: name,
+                address: address,
+                lat: lat,
+                lng: lng
+            };
+
+            // Remove prior hospital pin before planting the updated focus location marker
+            if (currentHospitalMarker) map.removeLayer(currentHospitalMarker);
+
+            // Create new red marker and map click listener
+            currentHospitalMarker = L.marker([lat, lng], { icon: hospitalIcon })
+                .addTo(map)
+                .bindPopup(`<b>${currentTargetHospital.name}</b>`)
+                .openPopup();
+
+            // FIXED: Map marker click updates route panel instantly
+            currentHospitalMarker.on('click', function() {
+                displayRouteCalculations();
+            });
+
+            displayRouteCalculations();
+        }
+
+        // Input search query parsing
+        searchInput.addEventListener('input', function() {
+            clearTimeout(searchDebounceTimer);
+            const query = this.value.trim();
+            searchResults.innerHTML = '';
+
+            if (query.length < 3) {
+                searchResults.style.display = 'none';
+                return;
+            }
+
+            searchDebounceTimer = setTimeout(async () => {
+                try {
+                    const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&limit=5`;
+                    const response = await fetch(url, { headers: { 'Accept-Language': 'en' } });
+                    const locations = await response.json();
+
+                    if (locations.length === 0) {
+                        searchResults.innerHTML = `<div class="search-item" style="color:#94a3b8; cursor:default;">No matching listings found</div>`;
+                    } else {
+                        locations.forEach(loc => {
+                            const item = document.createElement('div');
+                            item.className = 'search-item';
+                            item.innerText = loc.display_name;
+                            
+                            item.addEventListener('click', () => {
+                                const lat = parseFloat(loc.lat);
+                                const lng = parseFloat(loc.lon);
+                                const name = loc.name || "Selected Facility";
+                                
+                                map.setView([lat, lng], 16);
+                                selectHospital(name, loc.display_name, lat, lng);
+                                
+                                searchResults.style.display = 'none';
+                                searchInput.value = name;
+                            });
+                            searchResults.appendChild(item);
+                        });
+                    }
+                    searchResults.style.display = 'block';
+                } catch (err) {
+                    console.error("Geocoding exception: ", err);
+                }
+            }, 400);
+        });
+
+        document.addEventListener('click', function(e) {
+            if (!e.target.closest('.search-box')) searchResults.style.display = 'none';
+        });
+    </script>
+</body>
+</html>
